@@ -2,12 +2,16 @@
 
 namespace leveldb {
 // FileStates are reference counted. The initial reference count is zero
-// and the caller must call Ref() at least once.
+
+const bool kZNSRWTest = false;
+const bool kDataCmpTest = false;
+
 FileState::FileState() : refs_(0), size_(0) {
   static uint64_t total_mem_used = 0;
   total_mem_used += kMaxFileSize;
-  buffer_ = static_cast<char*>(spdk_dma_zmalloc(kMaxFileSize, 1, NULL));
-  if (!buffer_) {
+  mem_buffer_ = new char[kMaxFileSize];
+  spdk_buffer_ = static_cast<char*>(spdk_dma_zmalloc(kMaxFileSize, 1, NULL));
+  if (!spdk_buffer_) {
     SPDK_ERRLOG("Failed to allocate buffer\n");
     printf("total memory use:%lxMB\n", total_mem_used / 1024 / 1024);
     return;
@@ -45,7 +49,7 @@ Status FileState::Read(uint64_t offset, size_t n, Slice* result,
     *result = Slice();
     return Status::OK();
   }
-  std::memcpy(scratch, buffer_ + offset, n);
+  std::memcpy(scratch, mem_buffer_ + offset, n);
   *result = Slice(scratch, n);
   return Status::OK();
 }
@@ -55,60 +59,88 @@ Status FileState::Append(const Slice& data) {
   size_t src_len = data.size();
 
   std::lock_guard<std::mutex> lk(blocks_mutex_);
-  std::memcpy(buffer_ + size_, src, src_len);
+  std::memcpy(mem_buffer_ + size_, src, src_len);
   size_ += src_len;
   assert(size_ < kMaxFileSize);
   return Status::OK();
 }
 
 void FileState::ReadFromZNS() {
-  SpdkContext context;
-  context.unfinish_op = block_addrs_.size();  // 待完成的读操作
-  int offset = 0;
-  for (auto info : block_addrs_) {
-    int rc = SpdkApi::AppRead(buffer_ + offset, info.start_block,
-                              info.num_block, &context);  // 顺序读取各部分数据
-    if (rc != 0) {
-      printf("read zns data failed.  lba:%lx num:%d\n", info.start_block,
-             info.num_block);
+  if (kZNSRWTest == true) {
+    memset(spdk_buffer_, 0x0, kMaxFileSize);
+    SpdkContext context;
+    context.unfinish_op = block_addrs_.size();  // 待完成的读操作
+    int offset = 0;
+    for (auto info : block_addrs_) {
+      int rc =
+          SpdkApi::AppRead(spdk_buffer_ + offset, info.start_block,
+                           info.num_block, &context);  // 顺序读取各部分数据
+      if (rc != 0) {
+        printf("read zns data failed.  lba:%lx num:%d\n", info.start_block,
+               info.num_block);
+      }
+      offset += info.num_block * kBlockSize;
+      assert(offset < kMaxFileSize);
     }
-    offset += info.num_block * kBlockSize;
-    assert(offset < kMaxFileSize);
-  }
-  if (context.unfinish_op.load() > 0) {  // 等待读取操作全部完成
-    context.sem.Wait();
+    if (context.unfinish_op.load() > 0) {  // 等待读取操作全部完成
+      context.sem.Wait();
+    }
+    if (kDataCmpTest == true) {
+      int cmp_res = memcmp(spdk_buffer_, mem_buffer_, size_);
+      if (cmp_res != 0) {
+        for (int i = 0; i < size_; i++) {
+          if (spdk_buffer_[i] != mem_buffer_[i]) {
+            printf("start index:%d  block:%d spdk buffer %x mem buffer %x\n", i,
+                   i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
+            break;
+          }
+        }
+        for (int i = size_; i >= 0; i--) {
+          if (spdk_buffer_[i] != mem_buffer_[i]) {
+            printf("end index:%d  block:%d spdk buffer %x mem buffer %x\n", i,
+                   i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
+            break;
+          }
+        }
+        assert(0);
+      }
+    }
   }
 }
 
 blk_addr_t FileState::PickZone() { return 0x0; }
 
 void FileState::WriteToZNS() {
-  int offset = 0;
-  int num_block = (size_ + kBlockSize - 1) / kBlockSize;  // 向上取整
-  std::vector<SpdkContext> unfinsh_context(num_block);
-  int ret;
-  int index = 0;
-  while (num_block > 0) {
-    int num = std::min(num_block, kMaxTransmit);
-    if (num > 0) {
-      unfinsh_context[index].unfinish_op = 1;
-      blk_addr_t slba = PickZone();
-      int rc = SpdkApi::AppWrite(buffer_ + offset, slba, num,
-                                 &unfinsh_context[index]);
-      if (rc != 0) {
-        printf("write data to zns failed.  slba:%lx num:%d\n", slba, num);
+  if (kZNSRWTest == true) {
+    memcpy(spdk_buffer_, mem_buffer_, size_);  // 将数据往对比缓冲区备份一份
+
+    int offset = 0;
+    int num_block = (size_ + kBlockSize - 1) / kBlockSize;  // 向上取整
+    std::vector<SpdkContext> unfinsh_context(num_block);
+    int ret;
+    int index = 0;
+    while (num_block > 0) {
+      int num = std::min(num_block, kMaxTransmit);
+      if (num > 0) {
+        unfinsh_context[index].unfinish_op = 1;
+        blk_addr_t slba = PickZone();
+        int rc = SpdkApi::AppWrite(spdk_buffer_ + offset, slba, num,
+                                   &unfinsh_context[index]);
+        if (rc != 0) {
+          printf("write data to zns failed.  slba:%lx num:%d\n", slba, num);
+        }
+        index++;
+        block_addrs_.emplace_back(0x0, num);
       }
-      index++;
-      block_addrs_.emplace_back(0x0, num);
+      num_block -= num;
+      offset += num * kBlockSize;
     }
-    num_block -= num;
-    offset += num + kBlockSize;
-  }
-  for (int i = 0; i < block_addrs_.size(); i++) {
-    if (unfinsh_context[i].unfinish_op.load() > 0) {  // 等待写操作执行完成
-      unfinsh_context[i].sem.Wait();
+    for (int i = 0; i < block_addrs_.size(); i++) {
+      if (unfinsh_context[i].unfinish_op.load() > 0) {  // 等待写操作执行完成
+        unfinsh_context[i].sem.Wait();
+      }
+      block_addrs_[i].start_block = unfinsh_context[i].lba;  // 记录对应的LBA
     }
-    block_addrs_[i].start_block = unfinsh_context[i].lba;  // 记录对应的LBA
   }
 }
 
@@ -143,8 +175,8 @@ ZnsSpdkEnv::~ZnsSpdkEnv() {
   for (const auto& kvp : file_map_) {
     kvp.second->Unref();
   }
-  SpdkApi::AppStop(0);
-  spdk_app_context_.sem.Wait();  // 等待SPDK成功退出
+  SpdkApi::AppStop();
+  spdk_app_thread_.join();
   printf("ZNS SPDK Env destroy complete\n");
 }
 

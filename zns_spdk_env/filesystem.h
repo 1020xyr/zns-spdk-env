@@ -21,7 +21,7 @@ struct BlockInfo {
   BlockInfo() = default;
 };
 
-const int kMaxFileSize = 2 * 1024 * 1024;
+const int kMaxFileSize = 4 * 1024 * 1024;
 const int kMaxTransmit = 32;
 class FileState {
  public:
@@ -49,7 +49,9 @@ class FileState {
 
   void Truncate() {
     std::lock_guard<std::mutex> lk(blocks_mutex_);
-    spdk_dma_free(buffer_);  // 释放内存缓冲区
+    delete[] mem_buffer_;         // 释放普通内存
+    spdk_dma_free(spdk_buffer_);  // 释放大页内存
+
     size_ = 0;
   }
 
@@ -71,7 +73,8 @@ class FileState {
   int refs_;
 
   mutable std::mutex blocks_mutex_;
-  char* buffer_;  // 读缓冲区
+  char* mem_buffer_;
+  char* spdk_buffer_;
   uint64_t size_;
   std::vector<BlockInfo> block_addrs_;  // 块地址
 };

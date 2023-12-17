@@ -37,6 +37,7 @@ class IteratorWrapper {
   bool Valid() const { return valid_; }
   Slice key() const {
     assert(Valid());
+    assert(!key_.empty());
     return key_;
   }
   Slice value() const {

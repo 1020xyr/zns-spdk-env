@@ -43,7 +43,7 @@ struct SpdkContext {  // 回调函数参数类型
 class SpdkApi {  // 简单封装的SPDK API
  public:
   static void AppStart(SpdkContext* context);
-  static void AppStop(int rc);
+  static void AppStop();
   static int AppRead(char* data, uint64_t lba, int num_block,
                      SpdkContext* context);
   static int AppWrite(char* data, uint64_t slba, int num_block,
