@@ -3,17 +3,18 @@
 namespace leveldb {
 // FileStates are reference counted. The initial reference count is zero
 
-const bool kZNSRWTest = false;
+const bool kZNSWriteTest = true;
+const bool kZNSReadTest = false;
 const bool kDataCmpTest = false;
 
-FileState::FileState() : refs_(0), size_(0) {
+FileState::FileState() : refs_(0), size_(0), seg_num_(0) {
   static uint64_t total_mem_used = 0;
   total_mem_used += kMaxFileSize;
   mem_buffer_ = new char[kMaxFileSize];
   spdk_buffer_ = static_cast<char*>(spdk_dma_zmalloc(kMaxFileSize, 1, NULL));
   if (!spdk_buffer_) {
     SPDK_ERRLOG("Failed to allocate buffer\n");
-    printf("total memory use:%lxMB\n", total_mem_used / 1024 / 1024);
+    printf("total memory use:%ldMB\n", total_mem_used / 1024 / 1024);
     return;
   }
 }
@@ -66,26 +67,28 @@ Status FileState::Append(const Slice& data) {
 }
 
 void FileState::ReadFromZNS() {
-  if (kZNSRWTest == true) {
+  if (kZNSReadTest == true) {
     memset(spdk_buffer_, 0x0, kMaxFileSize);
     SpdkContext context;
-    context.unfinish_op = block_addrs_.size();  // 待完成的读操作
+    context.unfinish_op = seg_num_;  // 待完成的读操作
     int offset = 0;
-    for (auto info : block_addrs_) {
-      int rc =
-          SpdkApi::AppRead(spdk_buffer_ + offset, info.start_block,
-                           info.num_block, &context);  // 顺序读取各部分数据
+    for (int i = 0; i < seg_num_; i++) {
+      // 顺序读取各部分数据
+      int rc = AppRead(spdk_buffer_ + offset, data_seg_start_[i],
+                       data_seg_size_[i], &context);
       if (rc != 0) {
-        printf("read zns data failed.  lba:%lx num:%d\n", info.start_block,
-               info.num_block);
+        printf("read zns data failed.  lba:%lx num:%d\n", data_seg_start_[i],
+               data_seg_size_[i]);
       }
-      offset += info.num_block * kBlockSize;
+      offset += data_seg_size_[i] * kBlockSize;
       assert(offset < kMaxFileSize);
     }
     if (context.unfinish_op.load() > 0) {  // 等待读取操作全部完成
       context.sem.Wait();
     }
     if (kDataCmpTest == true) {
+      static int call_times = 0;
+      call_times++;
       int cmp_res = memcmp(spdk_buffer_, mem_buffer_, size_);
       if (cmp_res != 0) {
         for (int i = 0; i < size_; i++) {
@@ -102,45 +105,66 @@ void FileState::ReadFromZNS() {
             break;
           }
         }
+        printf("call times:%d\n", call_times);
         assert(0);
       }
     }
   }
 }
 
-blk_addr_t FileState::PickZone() { return 0x0; }
+uint64_t FileState::PickZone(uint64_t max_lba) {
+  const int expect_cap = 0x43000;
+  if (max_lba % 0x80000 <= expect_cap) {
+    return max_lba / 0x80000 * 0x80000;
+  }
+  return max_lba / 0x80000 * 0x80000 + 0x80000;
+}
 
 void FileState::WriteToZNS() {
-  if (kZNSRWTest == true) {
-    memcpy(spdk_buffer_, mem_buffer_, size_);  // 将数据往对比缓冲区备份一份
+  static uint64_t cur_max_lba = 0x0;
+  if (kZNSWriteTest == true) {
+    // 将数据往对比缓冲区备份一份
+    memcpy(spdk_buffer_, mem_buffer_, size_);
 
     int offset = 0;
     int num_block = (size_ + kBlockSize - 1) / kBlockSize;  // 向上取整
-    std::vector<SpdkContext> unfinsh_context(num_block);
+    SpdkContext share;
+    share.closed = false;
+    share.unfinish_op = 0;
+    AppWriteJobArg job_args[kMaxSegNum];
     int ret;
     int index = 0;
     while (num_block > 0) {
       int num = std::min(num_block, kMaxTransmit);
-      if (num > 0) {
-        unfinsh_context[index].unfinish_op = 1;
-        blk_addr_t slba = PickZone();
-        int rc = SpdkApi::AppWrite(spdk_buffer_ + offset, slba, num,
-                                   &unfinsh_context[index]);
-        if (rc != 0) {
-          printf("write data to zns failed.  slba:%lx num:%d\n", slba, num);
-        }
-        index++;
-        block_addrs_.emplace_back(0x0, num);
+      data_seg_size_[seg_num_] = num;
+      job_args[index].data = spdk_buffer_ + offset;
+      job_args[index].slba = PickZone(cur_max_lba);
+      job_args[index].num_block = num;
+      job_args[index].context.lba = &(data_seg_start_[seg_num_]);
+      job_args[index].context.share = &share;
+      share.unfinish_op.fetch_add(1);
+
+      // printf("app arg: %llx %d   lba ptr:%llx\n", job_args[index].slba, num,
+      //        job_args[index].context.lba);
+
+      int rc = AppWrite(&job_args[index]);
+      if (rc != 0) {
+        printf("write data to zns failed.  slba:%lx num:%d\n",
+               job_args[index].slba, num);
       }
+      index++;
+      seg_num_++;
       num_block -= num;
       offset += num * kBlockSize;
+      assert(offset + kMaxTransmit * kBlockSize < kMaxFileSize);
     }
-    for (int i = 0; i < block_addrs_.size(); i++) {
-      if (unfinsh_context[i].unfinish_op.load() > 0) {  // 等待写操作执行完成
-        unfinsh_context[i].sem.Wait();
-      }
-      block_addrs_[i].start_block = unfinsh_context[i].lba;  // 记录对应的LBA
+    share.closed = true;
+    if (share.unfinish_op.load() > 0) {
+      share.sem.Wait();
     }
+
+    cur_max_lba = std::max(cur_max_lba, data_seg_start_[seg_num_ - 1]);
+    // printf("end request. max_lba:%llx\n", cur_max_lba);
   }
 }
 
@@ -164,10 +188,21 @@ Status SequentialFileImpl::Skip(uint64_t n) {
   return Status::OK();
 }
 
+void CreateChannelJob(void* ctx) {
+  struct spdk_io_channel** channel = static_cast<struct spdk_io_channel**>(ctx);
+  *channel = spdk_bdev_get_io_channel(g_spdk_info.bdev_desc);
+  if (*channel == NULL) {
+    SPDK_ERRLOG("Could not create bdev I/O channel!!\n");
+    spdk_bdev_close(g_spdk_info.bdev_desc);
+    spdk_app_stop(-1);
+    return;
+  }
+}
 ZnsSpdkEnv::ZnsSpdkEnv(Env* base_env) : EnvWrapper(base_env) {
-  auto spdk_func = [&]() { SpdkApi::AppStart(&spdk_app_context_); };
+  auto spdk_func = [&]() { AppStart(&spdk_app_context_); };
   spdk_app_thread_ = std::thread(spdk_func);  // 创建线程，初始化SPDK
   spdk_app_context_.sem.Wait();               // 等待SPDK初始化完成
+
   printf("ZNS SPDK Env init complete\n");
 }
 
@@ -175,8 +210,9 @@ ZnsSpdkEnv::~ZnsSpdkEnv() {
   for (const auto& kvp : file_map_) {
     kvp.second->Unref();
   }
-  SpdkApi::AppStop();
+  AppStop();
   spdk_app_thread_.join();
+
   printf("ZNS SPDK Env destroy complete\n");
 }
 

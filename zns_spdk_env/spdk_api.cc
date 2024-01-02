@@ -1,13 +1,6 @@
 #include "zns_spdk_env/spdk_api.h"
 namespace leveldb {
 
-struct SpdkInfo {  // SPDK的一些相关信息
-  struct spdk_bdev* bdev;
-  struct spdk_bdev_desc* bdev_desc;
-  struct spdk_io_channel* bdev_io_channel;
-  spdk_thread* app_thread;
-};
-
 SpdkInfo g_spdk_info;
 
 static void bdev_event_cb(enum spdk_bdev_event_type type,
@@ -40,7 +33,7 @@ static void start_fn(void* arg) {
   SpdkContext* context = static_cast<SpdkContext*>(arg);
   uint32_t buf_align;
   int rc = 0;
-  const char* bdev_name = "Nvme0n1";
+  const char* bdev_name = "Nvme0n2";
   SPDK_NOTICELOG("Successfully started the application\n");
   SPDK_NOTICELOG("Opening the bdev %s\n", bdev_name);
   rc = spdk_bdev_open_ext(bdev_name, true, bdev_event_cb, NULL,
@@ -90,7 +83,7 @@ static void start_fn(void* arg) {
 }
 
 // app线程主函数
-void SpdkApi::AppStart(SpdkContext* context) {
+void AppStart(SpdkContext* context) {
   struct spdk_app_opts opts = {};
   int rc = 0;
 
@@ -115,7 +108,7 @@ void close_bdev(void* arg) {
 }
 
 // 结束app线程生命周期
-void SpdkApi::AppStop() {
+void AppStop() {
   spdk_thread_send_msg(spdk_thread_get_app_thread(), close_bdev, &g_spdk_info);
 }
 
@@ -137,11 +130,10 @@ static void ReadCpl(struct spdk_bdev_io* bdev_io, bool success, void* cb_arg) {
 }
 
 // 向块设备中读取数据
-int SpdkApi::AppRead(char* data, uint64_t lba, int num_block,
-                     SpdkContext* context) {
-  int rc =
-      spdk_bdev_read_blocks(g_spdk_info.bdev_desc, g_spdk_info.bdev_io_channel,
-                            data, lba, num_block, ReadCpl, context);
+int AppRead(char* data, uint64_t lba, int num_block, struct spdk_io_channel* ch,
+            SpdkContext* context) {
+  int rc = spdk_bdev_read_blocks(g_spdk_info.bdev_desc, ch, data, lba,
+                                 num_block, ReadCpl, context);
   if (rc != 0) {
     SPDK_ERRLOG("AppRead error %d", rc);
   }
@@ -150,28 +142,40 @@ int SpdkApi::AppRead(char* data, uint64_t lba, int num_block,
 
 // 写回调函数
 static void WriteCpl(struct spdk_bdev_io* bdev_io, bool success, void* cb_arg) {
-  SpdkContext* context = static_cast<SpdkContext*>(cb_arg);
+  SpdkAppendContext* context = static_cast<SpdkAppendContext*>(cb_arg);
+  // SPDK_NOTICELOG("lba ptr:%llx\n", context->lba);
   // 记录成功append的LBA
-  context->lba = spdk_bdev_io_get_append_location(bdev_io);
+  *context->lba = spdk_bdev_io_get_append_location(bdev_io);
+  printf("append lba:%lld  \n", *context->lba);
   spdk_bdev_free_io(bdev_io);
   if (!success) {
     SPDK_ERRLOG("bdev io write zone error: %d\n", EIO);
     assert(0);
     return;
   }
-  context->unfinish_op.fetch_sub(1);
-  context->sem.Signal();
+  context->share->unfinish_op.fetch_sub(1);
+  if (context->share->unfinish_op.load() == 0 &&
+      context->share->closed == true) {
+    context->share->sem.Signal();
+  }
 }
 
-// 向块设备中写入数据
-int SpdkApi::AppWrite(char* data, uint64_t slba, int num_block,
-                      SpdkContext* context) {
-  int rc =
-      spdk_bdev_zone_append(g_spdk_info.bdev_desc, g_spdk_info.bdev_io_channel,
-                            data, slba, num_block, WriteCpl, context);
+void AppWriteJob(void* ctx) {
+  AppWriteJobArg* arg = static_cast<AppWriteJobArg*>(ctx);
+  int rc = spdk_bdev_zone_append(
+      g_spdk_info.bdev_desc, g_spdk_info.bdev_io_channel, arg->data, arg->slba,
+      arg->num_block, WriteCpl, &arg->context);
+
   if (rc != 0) {
     SPDK_ERRLOG("AppWrite error %d", rc);
   }
-  return rc;
+}
+// 向块设备中写入数据
+int AppWrite(AppWriteJobArg* arg) {
+  int ret =
+      spdk_thread_send_msg(spdk_thread_get_app_thread(), AppWriteJob, arg);
+  if (ret != 0) {
+    SPDK_ERRLOG("AppWrite send thread msg error:%d\n", ret);
+  }
 }
 }  // namespace leveldb

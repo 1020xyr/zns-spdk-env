@@ -13,16 +13,11 @@
 #include "zns_spdk_env/spdk_api.h"
 
 namespace leveldb {
-using blk_addr_t = uint64_t;  // 块号类型
-struct BlockInfo {
-  blk_addr_t start_block;  // 起始块
-  int num_block;           // 块数
-  BlockInfo(blk_addr_t lba, int num) : start_block(lba), num_block(num) {}
-  BlockInfo() = default;
-};
 
 const int kMaxFileSize = 4 * 1024 * 1024;
 const int kMaxTransmit = 32;
+const int kBlockSize = 4 * 1024;
+const int kMaxSegNum = 100;
 class FileState {
  public:
   // FileStates are reference counted. The initial reference count is zero
@@ -61,13 +56,10 @@ class FileState {
 
   void ReadFromZNS();  // 从ZNS中读取文件内容
   void WriteToZNS();   // 向ZNS中写入文件内容
-
- private:
-  enum { kBlockSize = 4 * 1024 };
+  uint64_t PickZone(uint64_t max_lba);
 
   // Private since only Unref() should be used to delete it.
   ~FileState() { Truncate(); }
-  blk_addr_t PickZone();
 
   std::mutex refs_mutex_;
   int refs_;
@@ -76,7 +68,10 @@ class FileState {
   char* mem_buffer_;
   char* spdk_buffer_;
   uint64_t size_;
-  std::vector<BlockInfo> block_addrs_;  // 块地址
+
+  int seg_num_;
+  uint64_t data_seg_start_[kMaxSegNum];
+  int data_seg_size_[kMaxSegNum];
 };
 
 class SequentialFileImpl : public SequentialFile {

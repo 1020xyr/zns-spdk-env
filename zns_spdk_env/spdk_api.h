@@ -28,25 +28,46 @@ class Semaphore {  // 使用互斥锁与条件变量实现信号量
     --count_;
   }
 
+  void WaitFor(std::chrono::seconds second) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait_for(lock, second);
+    --count_;
+  }
+
  private:
   std::mutex mutex_;
   std::condition_variable cv_;
   int count_;
 };
 
+struct SpdkInfo {  // SPDK的一些相关信息
+  struct spdk_bdev* bdev;
+  struct spdk_bdev_desc* bdev_desc;
+  struct spdk_io_channel* bdev_io_channel;
+  spdk_thread* app_thread;
+};
+
+extern SpdkInfo g_spdk_info;
+
 struct SpdkContext {  // 回调函数参数类型
   Semaphore sem;
   std::atomic<int> unfinish_op;
-  uint64_t lba;
+  bool closed;
 };
 
-class SpdkApi {  // 简单封装的SPDK API
- public:
-  static void AppStart(SpdkContext* context);
-  static void AppStop();
-  static int AppRead(char* data, uint64_t lba, int num_block,
-                     SpdkContext* context);
-  static int AppWrite(char* data, uint64_t slba, int num_block,
-                      SpdkContext* context);
+struct SpdkAppendContext {  // 回调函数参数类型
+  SpdkContext* share;
+  uint64_t* lba;
 };
+struct AppWriteJobArg {
+  char* data;
+  uint64_t slba;
+  int num_block;
+  SpdkAppendContext context;
+};
+void AppStart(SpdkContext* context);
+void AppStop();
+int AppRead(char* data, uint64_t lba, int num_block, SpdkContext* context);
+int AppWrite(AppWriteJobArg* arg);
+
 }  // namespace leveldb
