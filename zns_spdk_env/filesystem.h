@@ -14,10 +14,10 @@
 
 namespace leveldb {
 
-const int kMaxFileSize = 4 * 1024 * 1024;
-const int kMaxTransmit = 32;
-const int kBlockSize = 4 * 1024;
-const int kMaxSegNum = 100;
+const int kMaxFileSize = 4 * 1024 * 1024;  // 最大SST文件容量
+const int kMaxTransmit = 32;               // 单次ZNS命令最大逻辑块数
+const int kBlockSize = 4 * 1024;           // 逻辑块大小
+const int kMaxSegNum = 100;                // 单个SST文件包含的最大逻辑块区域数
 class FileState {
  public:
   // FileStates are reference counted. The initial reference count is zero
@@ -55,7 +55,10 @@ class FileState {
   Status Append(const Slice& data);
 
   void ReadFromZNS();  // 从ZNS中读取文件内容
-  void WriteToZNS();   // 向ZNS中写入文件内容
+
+  void WriteToZNS();  // 向ZNS中写入文件内容
+
+  // 选择当前请求对应的Zone id，可根据需求添加相关参数
   uint64_t PickZone(uint64_t max_lba);
 
   // Private since only Unref() should be used to delete it.
@@ -69,6 +72,7 @@ class FileState {
   char* spdk_buffer_;
   uint64_t size_;
 
+  // SST文件内容对应的ZNS逻辑块区域
   int seg_num_;
   uint64_t data_seg_start_[kMaxSegNum];
   int data_seg_size_[kMaxSegNum];
@@ -101,10 +105,7 @@ class RandomAccessFileImpl : public RandomAccessFile {
 
   ~RandomAccessFileImpl() override { file_->Unref(); }
 
-  Status Read(uint64_t offset, size_t n, Slice* result,
-              char* scratch) const override {
-    return file_->Read(offset, n, result, scratch);
-  }
+  Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) const override { return file_->Read(offset, n, result, scratch); }
 
  private:
   FileState* file_;
@@ -136,25 +137,19 @@ class ZnsSpdkEnv : public EnvWrapper {
   ~ZnsSpdkEnv() override;
 
   // Partial implementation of the Env interface.
-  Status NewSequentialFile(const std::string& fname,
-                           SequentialFile** result) override;
+  Status NewSequentialFile(const std::string& fname, SequentialFile** result) override;
 
-  Status NewRandomAccessFile(const std::string& fname,
-                             RandomAccessFile** result) override;
+  Status NewRandomAccessFile(const std::string& fname, RandomAccessFile** result) override;
 
-  Status NewWritableFile(const std::string& fname,
-                         WritableFile** result) override;
+  Status NewWritableFile(const std::string& fname, WritableFile** result) override;
 
-  Status NewAppendableFile(const std::string& fname,
-                           WritableFile** result) override;
+  Status NewAppendableFile(const std::string& fname, WritableFile** result) override;
 
   bool FileExists(const std::string& fname) override;
 
-  Status GetChildren(const std::string& dir,
-                     std::vector<std::string>* result) override;
+  Status GetChildren(const std::string& dir, std::vector<std::string>* result) override;
 
-  void RemoveFileInternal(const std::string& fname)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void RemoveFileInternal(const std::string& fname) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   Status RemoveFile(const std::string& fname) override;
 

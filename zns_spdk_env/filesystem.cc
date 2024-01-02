@@ -4,12 +4,13 @@ namespace leveldb {
 // FileStates are reference counted. The initial reference count is zero
 
 const bool kZNSWriteTest = true;
-const bool kZNSReadTest = false;
-const bool kDataCmpTest = false;
+const bool kZNSReadTest = true;
+const bool kDataCmpTest = true;
 
 FileState::FileState() : refs_(0), size_(0), seg_num_(0) {
   static uint64_t total_mem_used = 0;
   total_mem_used += kMaxFileSize;
+  // 申请普通内存与大页内存
   mem_buffer_ = new char[kMaxFileSize];
   spdk_buffer_ = static_cast<char*>(spdk_dma_zmalloc(kMaxFileSize, 1, NULL));
   if (!spdk_buffer_) {
@@ -18,6 +19,7 @@ FileState::FileState() : refs_(0), size_(0), seg_num_(0) {
     return;
   }
 }
+
 // Decrease the reference count. Delete if this is the last reference.
 void FileState::Unref() {
   bool do_delete = false;
@@ -36,8 +38,7 @@ void FileState::Unref() {
   }
 }
 
-Status FileState::Read(uint64_t offset, size_t n, Slice* result,
-                       char* scratch) const {
+Status FileState::Read(uint64_t offset, size_t n, Slice* result, char* scratch) const {
   std::lock_guard<std::mutex> lk(blocks_mutex_);
   if (offset > size_) {
     return Status::IOError("Offset greater than file size.");
@@ -70,15 +71,18 @@ void FileState::ReadFromZNS() {
   if (kZNSReadTest == true) {
     memset(spdk_buffer_, 0x0, kMaxFileSize);
     SpdkContext context;
-    context.unfinish_op = seg_num_;  // 待完成的读操作
+    context.unfinish_op = seg_num_;  // 待完成的读操作数
+    AppReadJobArg job_args[kMaxSegNum];
     int offset = 0;
     for (int i = 0; i < seg_num_; i++) {
+      job_args[i].data = spdk_buffer_ + offset;
+      job_args[i].lba = data_seg_start_[i];
+      job_args[i].num_block = data_seg_size_[i];
+      job_args[i].context = &context;
       // 顺序读取各部分数据
-      int rc = AppRead(spdk_buffer_ + offset, data_seg_start_[i],
-                       data_seg_size_[i], &context);
+      int rc = AppRead(&job_args[i]);
       if (rc != 0) {
-        printf("read zns data failed.  lba:%lx num:%d\n", data_seg_start_[i],
-               data_seg_size_[i]);
+        printf("read zns data failed.  lba:%lx num:%d\n", data_seg_start_[i], data_seg_size_[i]);
       }
       offset += data_seg_size_[i] * kBlockSize;
       assert(offset < kMaxFileSize);
@@ -93,15 +97,13 @@ void FileState::ReadFromZNS() {
       if (cmp_res != 0) {
         for (int i = 0; i < size_; i++) {
           if (spdk_buffer_[i] != mem_buffer_[i]) {
-            printf("start index:%d  block:%d spdk buffer %x mem buffer %x\n", i,
-                   i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
+            printf("start index:%d  block:%d spdk buffer %x mem buffer %x\n", i, i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
             break;
           }
         }
         for (int i = size_; i >= 0; i--) {
           if (spdk_buffer_[i] != mem_buffer_[i]) {
-            printf("end index:%d  block:%d spdk buffer %x mem buffer %x\n", i,
-                   i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
+            printf("end index:%d  block:%d spdk buffer %x mem buffer %x\n", i, i / kBlockSize, spdk_buffer_[i], mem_buffer_[i]);
             break;
           }
         }
@@ -113,15 +115,16 @@ void FileState::ReadFromZNS() {
 }
 
 uint64_t FileState::PickZone(uint64_t max_lba) {
-  const int expect_cap = 0x43000;
-  if (max_lba % 0x80000 <= expect_cap) {
-    return max_lba / 0x80000 * 0x80000;
+  const int expect_cap = 0x43000;           // 设置的容量阈值，超过
+  const int zone_size = 0x80000;            // zone size，注意zone size与zone capacity不一致
+  if (max_lba % zone_size <= expect_cap) {  // 未超过阈值，选择当前zone即可
+    return max_lba / zone_size * zone_size;
   }
-  return max_lba / 0x80000 * 0x80000 + 0x80000;
+  return max_lba / zone_size * zone_size + zone_size;  // 超过阈值，选择下一个zone
 }
 
 void FileState::WriteToZNS() {
-  static uint64_t cur_max_lba = 0x0;
+  static uint64_t cur_max_lba = 0x0;  // 目前出现的最大lba
   if (kZNSWriteTest == true) {
     // 将数据往对比缓冲区备份一份
     memcpy(spdk_buffer_, mem_buffer_, size_);
@@ -138,7 +141,7 @@ void FileState::WriteToZNS() {
       int num = std::min(num_block, kMaxTransmit);
       data_seg_size_[seg_num_] = num;
       job_args[index].data = spdk_buffer_ + offset;
-      job_args[index].slba = PickZone(cur_max_lba);
+      job_args[index].slba = PickZone(cur_max_lba);  // 选择合适的zone写入
       job_args[index].num_block = num;
       job_args[index].context.lba = &(data_seg_start_[seg_num_]);
       job_args[index].context.share = &share;
@@ -149,8 +152,7 @@ void FileState::WriteToZNS() {
 
       int rc = AppWrite(&job_args[index]);
       if (rc != 0) {
-        printf("write data to zns failed.  slba:%lx num:%d\n",
-               job_args[index].slba, num);
+        printf("write data to zns failed.  slba:%lx num:%d\n", job_args[index].slba, num);
       }
       index++;
       seg_num_++;
@@ -158,7 +160,7 @@ void FileState::WriteToZNS() {
       offset += num * kBlockSize;
       assert(offset + kMaxTransmit * kBlockSize < kMaxFileSize);
     }
-    share.closed = true;
+    share.closed = true;  // 停止写入
     if (share.unfinish_op.load() > 0) {
       share.sem.Wait();
     }
@@ -188,16 +190,6 @@ Status SequentialFileImpl::Skip(uint64_t n) {
   return Status::OK();
 }
 
-void CreateChannelJob(void* ctx) {
-  struct spdk_io_channel** channel = static_cast<struct spdk_io_channel**>(ctx);
-  *channel = spdk_bdev_get_io_channel(g_spdk_info.bdev_desc);
-  if (*channel == NULL) {
-    SPDK_ERRLOG("Could not create bdev I/O channel!!\n");
-    spdk_bdev_close(g_spdk_info.bdev_desc);
-    spdk_app_stop(-1);
-    return;
-  }
-}
 ZnsSpdkEnv::ZnsSpdkEnv(Env* base_env) : EnvWrapper(base_env) {
   auto spdk_func = [&]() { AppStart(&spdk_app_context_); };
   spdk_app_thread_ = std::thread(spdk_func);  // 创建线程，初始化SPDK
@@ -211,14 +203,13 @@ ZnsSpdkEnv::~ZnsSpdkEnv() {
     kvp.second->Unref();
   }
   AppStop();
-  spdk_app_thread_.join();
+  spdk_app_thread_.join();  // 等等线程结束
 
   printf("ZNS SPDK Env destroy complete\n");
 }
 
 // Partial implementation of the Env interface.
-Status ZnsSpdkEnv::NewSequentialFile(const std::string& fname,
-                                     SequentialFile** result) {
+Status ZnsSpdkEnv::NewSequentialFile(const std::string& fname, SequentialFile** result) {
   MutexLock lock(&mutex_);
   if (file_map_.find(fname) == file_map_.end()) {  // 文件不存在则报错
     *result = nullptr;
@@ -229,8 +220,7 @@ Status ZnsSpdkEnv::NewSequentialFile(const std::string& fname,
   return Status::OK();
 }
 
-Status ZnsSpdkEnv::NewRandomAccessFile(const std::string& fname,
-                                       RandomAccessFile** result) {
+Status ZnsSpdkEnv::NewRandomAccessFile(const std::string& fname, RandomAccessFile** result) {
   MutexLock lock(&mutex_);
   if (file_map_.find(fname) == file_map_.end()) {  // 文件不存在则报错
     *result = nullptr;
@@ -241,8 +231,7 @@ Status ZnsSpdkEnv::NewRandomAccessFile(const std::string& fname,
   return Status::OK();
 }
 
-Status ZnsSpdkEnv::NewWritableFile(const std::string& fname,
-                                   WritableFile** result) {
+Status ZnsSpdkEnv::NewWritableFile(const std::string& fname, WritableFile** result) {
   MutexLock lock(&mutex_);
   FileSystem::iterator it = file_map_.find(fname);
 
@@ -261,8 +250,7 @@ Status ZnsSpdkEnv::NewWritableFile(const std::string& fname,
   return Status::OK();
 }
 
-Status ZnsSpdkEnv::NewAppendableFile(const std::string& fname,
-                                     WritableFile** result) {
+Status ZnsSpdkEnv::NewAppendableFile(const std::string& fname, WritableFile** result) {
   MutexLock lock(&mutex_);
   FileState** sptr = &file_map_[fname];
   FileState* file = *sptr;
@@ -279,16 +267,14 @@ bool ZnsSpdkEnv::FileExists(const std::string& fname) {
   return file_map_.find(fname) != file_map_.end();
 }
 
-Status ZnsSpdkEnv::GetChildren(const std::string& dir,
-                               std::vector<std::string>* result) {
+Status ZnsSpdkEnv::GetChildren(const std::string& dir, std::vector<std::string>* result) {
   MutexLock lock(&mutex_);
   result->clear();
 
   for (const auto& kvp : file_map_) {
     const std::string& filename = kvp.first;
     // 比对文件名前缀是否与给定目录一致，返回文件名而不是完整的路径
-    if (filename.size() >= dir.size() + 1 && filename[dir.size()] == '/' &&
-        Slice(filename).starts_with(Slice(dir))) {
+    if (filename.size() >= dir.size() + 1 && filename[dir.size()] == '/' && Slice(filename).starts_with(Slice(dir))) {
       result->push_back(filename.substr(dir.size() + 1));
     }
   }
@@ -296,8 +282,7 @@ Status ZnsSpdkEnv::GetChildren(const std::string& dir,
   return Status::OK();
 }
 
-void ZnsSpdkEnv::RemoveFileInternal(const std::string& fname)
-    EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
+void ZnsSpdkEnv::RemoveFileInternal(const std::string& fname) EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
   if (file_map_.find(fname) == file_map_.end()) {
     return;
   }
@@ -326,8 +311,7 @@ Status ZnsSpdkEnv::GetFileSize(const std::string& fname, uint64_t* file_size) {
   return Status::OK();
 }
 
-Status ZnsSpdkEnv::RenameFile(const std::string& src,
-                              const std::string& target) {
+Status ZnsSpdkEnv::RenameFile(const std::string& src, const std::string& target) {
   MutexLock lock(&mutex_);
   if (file_map_.find(src) == file_map_.end()) {
     return Status::IOError(src, "File not found");

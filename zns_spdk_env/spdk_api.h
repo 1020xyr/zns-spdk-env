@@ -55,19 +55,29 @@ struct SpdkContext {  // 回调函数参数类型
   bool closed;
 };
 
-struct SpdkAppendContext {  // 回调函数参数类型
+struct SpdkAppendContext {  // Append回调函数参数类型
   SpdkContext* share;
   uint64_t* lba;
 };
+// 读操作参数
+struct AppReadJobArg {
+  char* data;
+  uint64_t lba;
+  int num_block;
+  SpdkContext* context;
+};
+
+// 写操作参数
 struct AppWriteJobArg {
   char* data;
   uint64_t slba;
   int num_block;
   SpdkAppendContext context;
 };
-void AppStart(SpdkContext* context);
-void AppStop();
-int AppRead(char* data, uint64_t lba, int num_block, SpdkContext* context);
+
+void AppStart(SpdkContext* context);  // 启动spdk app
+void AppStop();                       // 停止spdk app
+int AppRead(AppReadJobArg* arg);    
 int AppWrite(AppWriteJobArg* arg);
 
 }  // namespace leveldb

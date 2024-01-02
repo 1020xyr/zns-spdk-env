@@ -22,7 +22,7 @@ std::string RandStr(int min_len,
   return str;
 }
 
-std::string RandStr(int len) {  // 生成min_len-max_len之间大小的字符串
+std::string RandStr(int len) {  // 生成长度为len的随机字符串
   std::string str;
   char c;
   int idx;
@@ -45,25 +45,26 @@ void PrintStats(leveldb::DB* db, std::string key) {
 int main() {
   leveldb::DB* db;
   leveldb::Options options;
-  options.env =
-      leveldb::Env::NewZnsSpdk(leveldb::Env::Default());  // spdk env实现
-  options.create_if_missing = true;  // 不存在时创建数据库
+  options.env = leveldb::Env::NewZnsSpdk(leveldb::Env::Default());  // spdk env实现
+  options.create_if_missing = true;                                 // 不存在时创建数据库
   leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
   assert(status.ok());
   printf("leveldb open complete.\n");
   std::vector<std::string> keys;  // kv测试数据
+  // 生成测试数据，key为16字节的随机字符串，value为25个'a'
   int key_num = 1 << 22;
   for (int i = 0; i < key_num; i++) {
     keys.emplace_back(RandStr(16));
   }
   std::string test_value = std::string('a', 25);
   auto start = std::chrono::system_clock::now();
+  // 写入数据
   printf("write part.\n");
-  for (auto& key : keys) {  // 写入数据
+  for (auto& key : keys) {
     leveldb::Status s = db->Put(leveldb::WriteOptions(), key, test_value);
     assert(s.ok());
   }
-
+  // 读取数据
   printf("read part.\n");
   for (int k = 0; k <= 10; k++) {
     std::random_shuffle(keys.begin(), keys.end());  // 打乱数据顺序
@@ -76,8 +77,7 @@ int main() {
   }
 
   auto end = std::chrono::system_clock::now();
-  printf("用时:%lds\n",
-         std::chrono::duration_cast<std::chrono::seconds>(end - start).count());
+  printf("用时:%lds\n", std::chrono::duration_cast<std::chrono::seconds>(end - start).count());
   PrintStats(db, "leveldb.num-files-at-level0");
   PrintStats(db, "leveldb.num-files-at-level1");
   PrintStats(db, "leveldb.num-files-at-level2");
