@@ -25,6 +25,7 @@ make install # 实际上可以不安装到系统目录，不过我没有使用-I
 leveldb按照github步骤编译第三方库即可
 
 ```bash
+git submodule update --init --recursive
 cmake -DCMAKE_BUILD_TYPE=Debug .. && cmake --build .
 make 
 make install
