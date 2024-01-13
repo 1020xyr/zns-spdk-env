@@ -19,6 +19,13 @@ struct FileInfo {
 
 extern std::map<int, FileInfo> kGlobalInfo;
 
+// TODO
+/*
+记录每个zone当前存在的文件名
+实现删除操作
+实现文件的数据迁移
+实现重置分区的操作
+*/
 void PrintInfo();
 
 }  // namespace leveldb

@@ -1,4 +1,5 @@
 #include "fake_zns_spdk_env/filesystem.h"
+#include <iostream>
 
 namespace leveldb {
 // FileStates are reference counted. The initial reference count is zero
@@ -7,12 +8,16 @@ const bool kZNSWriteTest = true;
 const bool kZNSReadTest = true;
 const bool kDataCmpTest = true;
 
-FileState::FileState() : refs_(0), size_(0), seg_num_(0) {
+FileState::FileState(std::string fname) : refs_(0), size_(0), seg_num_(0), fname_(fname) {
   static uint64_t total_mem_used = 0;
   total_mem_used += kMaxFileSize;
   // 申请普通内存与大页内存
   mem_buffer_ = new char[kMaxFileSize];
   tmp_buffer_ = new char[kMaxFileSize];
+
+  std::string pure_name = fname.substr(fname.find_last_of('/') + 1);
+  ParseFileName(pure_name, &number_, &type_);
+  std::cout << fname << " " << pure_name << " " << number_ << " " << type_ << std::endl;
 }
 
 // Decrease the reference count. Delete if this is the last reference.
@@ -63,6 +68,9 @@ Status FileState::Append(const Slice& data) {
 }
 
 void FileState::ReadFromZNS() {
+  if (type_ != kTableFile) {
+    return;
+  }
   if (kZNSReadTest == true) {
     SpdkContext context;
     context.unfinish_op = seg_num_;  // 待完成的读操作数
@@ -106,9 +114,10 @@ void FileState::ReadFromZNS() {
         }
       }
       printf("call times:%d\n", call_times);
+      // 读取第一个错误块
       char debug_data[kBlockSize];
       SpdkContext context;
-      context.unfinish_op = 1;  // 待完成的读操作数
+      context.unfinish_op = 1;
       AppReadJobArg debug_arg;
       debug_arg.data = debug_data;
       for (int i = 0; i < seg_num_; i++) {
@@ -123,6 +132,7 @@ void FileState::ReadFromZNS() {
       debug_arg.context = &context;
       // 顺序读取各部分数据
       int rc = FackZNSDevice::GetInstance()->AppRead(&debug_arg);
+      assert(0);
     }
   }
 }
@@ -137,6 +147,9 @@ uint64_t FileState::PickZone(uint64_t max_lba) {
 }
 
 void FileState::WriteToZNS() {
+  if (type_ != kTableFile) {
+    return;
+  }
   static uint64_t cur_max_lba = 0x0;  // 目前出现的最大lba
   if (kZNSWriteTest == true) {
     // 将数据往对比缓冲区备份一份
@@ -148,24 +161,27 @@ void FileState::WriteToZNS() {
     share.closed = false;
     share.unfinish_op = 0;
     AppAppendJobArg job_args[kMaxSegNum];
+    uint64_t slba = PickZone(cur_max_lba);  // 选择合适的zone写入
+
     int ret;
     int index = 0;
     while (num_block > 0) {
       int num = std::min(num_block, kMaxTransmit);
       data_seg_size_[seg_num_] = num;
       job_args[index].data = tmp_buffer_ + offset;
-      job_args[index].slba = PickZone(cur_max_lba);  // 选择合适的zone写入
+      job_args[index].slba = slba;
       job_args[index].num_block = num;
       job_args[index].context.lba = &(data_seg_start_[seg_num_]);
       job_args[index].context.share = &share;
       share.unfinish_op.fetch_add(1);
 
-      // printf("app arg: %llx %d   lba ptr:%llx\n", job_args[index].slba, num, job_args[index].context.lba);
+      // printf("app arg: %llx %d  \n", job_args[index].slba, num);
 
       int rc = FackZNSDevice::GetInstance()->AppAppend(&job_args[index]);
       if (rc != 0) {
         printf("write data to zns failed.  slba:%lx num:%d\n", job_args[index].slba, num);
       }
+
       index++;
       seg_num_++;
       num_block -= num;
@@ -243,7 +259,7 @@ Status FakeZnsSpdkEnv::NewWritableFile(const std::string& fname, WritableFile** 
   FileState* file;
   if (it == file_map_.end()) {  // 文件不存在则创建新文件
     // File is not currently open.
-    file = new FileState();
+    file = new FileState(fname);
     file->Ref();
     file_map_[fname] = file;
   } else {  // 文件存在则清空文件内容
@@ -260,7 +276,7 @@ Status FakeZnsSpdkEnv::NewAppendableFile(const std::string& fname, WritableFile*
   FileState** sptr = &file_map_[fname];
   FileState* file = *sptr;
   if (file == nullptr) {  // 文件不存在则创建新文件
-    file = new FileState();
+    file = new FileState(fname);
     file->Ref();
   }
   *result = new WritableFileImpl(file);
@@ -318,6 +334,7 @@ Status FakeZnsSpdkEnv::GetFileSize(const std::string& fname, uint64_t* file_size
 
 Status FakeZnsSpdkEnv::RenameFile(const std::string& src, const std::string& target) {
   MutexLock lock(&mutex_);
+  printf("filename from %s to %s\n", src.c_str(), target.c_str());
   if (file_map_.find(src) == file_map_.end()) {
     return Status::IOError(src, "File not found");
   }

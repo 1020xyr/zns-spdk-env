@@ -12,6 +12,7 @@
 #include "port/thread_annotations.h"
 #include "util/mutexlock.h"
 #include "fake_zns_spdk_env/fake_device.h"
+#include "db/filename.h"
 
 namespace leveldb {
 
@@ -22,7 +23,7 @@ class FileState {
  public:
   // FileStates are reference counted. The initial reference count is zero
   // and the caller must call Ref() at least once.
-  FileState();
+  FileState(std::string fname);
 
   // No copying allowed.
   FileState(const FileState&) = delete;
@@ -62,6 +63,10 @@ class FileState {
 
   // Private since only Unref() should be used to delete it.
   ~FileState() { Truncate(); }
+
+  std::string fname_;
+  uint64_t number_;
+  FileType type_;
 
   std::mutex refs_mutex_;
   int refs_;

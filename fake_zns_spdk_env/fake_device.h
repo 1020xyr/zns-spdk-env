@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <cstring>
+#include <cassert>
 
 namespace leveldb {
 const int kMemSize = 1 << 27;
@@ -64,9 +65,10 @@ struct AppAppendJobArg {
   SpdkAppendContext context;
 };
 
+// ZNS SSD中各个分区抽象
 struct Zone {
-  char* wp;
-  char data[kMemSize];
+  char* wp;             // 写指针
+  char data[kMemSize];  // 分区数据
 };
 
 class FackZNSDevice {
@@ -79,7 +81,10 @@ class FackZNSDevice {
 
   int AppRead(AppReadJobArg* arg);
   int AppAppend(AppAppendJobArg* arg);
-  uint64_t GetWritePointLba(int zone_id) { return zone_id * kZoneSize + (zones_[zone_id].wp - zones_[zone_id].data) / kBlockSize; }
+  uint64_t GetWritePointLba(int zone_id) {
+    assert(((zones_[zone_id].wp - zones_[zone_id].data) % kBlockSize) == 0);
+    return zone_id * kZoneSize + (zones_[zone_id].wp - zones_[zone_id].data) / kBlockSize;
+  }
 
  private:
   FackZNSDevice();
