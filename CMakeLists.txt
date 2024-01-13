@@ -191,10 +191,14 @@ target_sources(leveldb
     "util/random.h"
     "util/status.cc"
 
-    "zns_spdk_env/spdk_api.h"
-    "zns_spdk_env/spdk_api.cc"
-    "zns_spdk_env/filesystem.h"
-    "zns_spdk_env/filesystem.cc"
+
+    "info/info.h"
+    "info/info.cc"
+
+    "fake_zns_spdk_env/fake_device.h"
+    "fake_zns_spdk_env/fake_device.cc"
+    "fake_zns_spdk_env/filesystem.h"
+    "fake_zns_spdk_env/filesystem.cc"
   # Only CMake 3.3+ supports PUBLIC sources in targets exported by "install".
   $<$<VERSION_GREATER:CMAKE_VERSION,3.2>:PUBLIC>
     "${LEVELDB_PUBLIC_INCLUDE_DIR}/c.h"

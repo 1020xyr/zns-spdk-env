@@ -66,6 +66,7 @@ class LEVELDB_EXPORT Env {
 
   static Env* NewZnsSpdk(Env* base_env);
 
+  static Env* NewFakeZnsSpdkEnv(Env* base_env);
   // Create an object that sequentially reads the file with the specified name.
   // On success, stores a pointer to the new file in *result and returns OK.
   // On failure stores nullptr in *result and returns non-OK.  If the file does

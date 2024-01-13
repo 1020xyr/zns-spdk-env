@@ -1,22 +1,22 @@
-#pragma once
 #include <cstring>
 #include <limits>
 #include <map>
 #include <string>
 #include <vector>
 #include <thread>
+
+#pragma once
 #include "leveldb/env.h"
 #include "leveldb/status.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/mutexlock.h"
-#include "zns_spdk_env/spdk_api.h"
+#include "fake_zns_spdk_env/fake_device.h"
 
 namespace leveldb {
 
 const int kMaxFileSize = 4 * 1024 * 1024;  // 最大SST文件容量
 const int kMaxTransmit = 32;               // 单次ZNS命令最大逻辑块数
-const int kBlockSize = 4 * 1024;           // 逻辑块大小
 const int kMaxSegNum = 100;                // 单个SST文件包含的最大逻辑块区域数
 class FileState {
  public:
@@ -44,9 +44,8 @@ class FileState {
 
   void Truncate() {
     std::lock_guard<std::mutex> lk(blocks_mutex_);
-    delete[] mem_buffer_;         // 释放普通内存
-    spdk_dma_free(spdk_buffer_);  // 释放大页内存
-
+    delete[] mem_buffer_;  // 释放普通内存
+    delete[] tmp_buffer_;
     size_ = 0;
   }
 
@@ -69,7 +68,7 @@ class FileState {
 
   mutable std::mutex blocks_mutex_;
   char* mem_buffer_;
-  char* spdk_buffer_;
+  char* tmp_buffer_;
   uint64_t size_;
 
   // SST文件内容对应的ZNS逻辑块区域
@@ -130,11 +129,11 @@ class WritableFileImpl : public WritableFile {
   FileState* file_;
 };
 
-class ZnsSpdkEnv : public EnvWrapper {
+class FakeZnsSpdkEnv : public EnvWrapper {
  public:
-  explicit ZnsSpdkEnv(Env* base_env);
+  explicit FakeZnsSpdkEnv(Env* base_env);
 
-  ~ZnsSpdkEnv() override;
+  ~FakeZnsSpdkEnv() override;
 
   // Partial implementation of the Env interface.
   Status NewSequentialFile(const std::string& fname, SequentialFile** result) override;
@@ -179,11 +178,8 @@ class ZnsSpdkEnv : public EnvWrapper {
  private:
   // Map from filenames to FileState objects, representing a simple file system.
   typedef std::map<std::string, FileState*> FileSystem;
-
   port::Mutex mutex_;
   FileSystem file_map_ GUARDED_BY(mutex_);
-  std::thread spdk_app_thread_;
-  SpdkContext spdk_app_context_;
 };
 
 };  // namespace leveldb
